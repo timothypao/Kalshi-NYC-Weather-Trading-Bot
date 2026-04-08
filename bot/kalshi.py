@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import re
 from typing import Any
 
 import requests
@@ -12,16 +13,32 @@ BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 SERIES_TICKER = "KXHIGHNY"
 
 
+def parse_band_midpoint_f_from_ticker(ticker: str) -> float | None:
+    """Band midpoint °F from ticker, e.g. KXHIGHNY-26APR06-B54.5 -> 54.5."""
+    m = re.search(r"-B(\d+\.?\d*)$", str(ticker))
+    if not m:
+        m = re.search(r"-B(\d+\.?\d*)", str(ticker))
+    if not m:
+        return None
+    return float(m.group(1))
+
+
+def _parse_threshold_f_from_ticker(ticker: str) -> float | None:
+    """Kept for compatibility: KXHIGHNY uses ``-B`` band midpoints, not ``-T``."""
+    return parse_band_midpoint_f_from_ticker(ticker)
+
+
 def _to_float(value: Any) -> float | None:
     if value in (None, ""):
         return None
     return float(value)
 
 
-def get_today_market() -> dict[str, Any]:
-    """Return today's active KXHIGHNY market details.
+def get_today_market() -> list[dict[str, Any]]:
+    """Return all open KXHIGHNY markets for today's date token.
 
-    Returns a dict with keys: ticker, title, yes_price, no_price, volume.
+    Each item has: ticker, title, yes_price, no_price, volume, band_midpoint
+    (``band_midpoint`` is None when the ticker has no ``-B...`` segment).
     """
     url = f"{BASE_URL}/markets?series_ticker={SERIES_TICKER}&status=open"
     response = requests.get(url, timeout=20)
@@ -37,16 +54,22 @@ def get_today_market() -> dict[str, Any]:
             f"No open KXHIGHNY market found for today token '{today_token}'."
         )
 
-    # If multiple strikes are open today, pick the most active by volume.
-    market = max(todays_markets, key=lambda m: float(m.get("volume_fp", 0) or 0))
+    out: list[dict[str, Any]] = []
+    for m in todays_markets:
+        t = m.get("ticker") or ""
+        out.append(
+            {
+                "ticker": m.get("ticker"),
+                "title": m.get("title"),
+                "yes_price": _to_float(m.get("yes_ask_dollars")),
+                "no_price": _to_float(m.get("no_ask_dollars")),
+                "volume": _to_float(m.get("volume_fp")),
+                "band_midpoint": parse_band_midpoint_f_from_ticker(t),
+            }
+        )
 
-    return {
-        "ticker": market.get("ticker"),
-        "title": market.get("title"),
-        "yes_price": _to_float(market.get("yes_ask_dollars")),
-        "no_price": _to_float(market.get("no_ask_dollars")),
-        "volume": _to_float(market.get("volume_fp")),
-    }
+    out.sort(key=lambda row: (row["band_midpoint"] is None, row["band_midpoint"] or 0.0))
+    return out
 
 
 def get_market_orderbook(ticker: str) -> dict[str, Any]:
@@ -58,10 +81,16 @@ def get_market_orderbook(ticker: str) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    today_market = get_today_market()
-    print("Today's active KXHIGHNY market:")
-    print(json.dumps(today_market, indent=2))
-    print()
-
-    print(f"Order book for {today_market['ticker']}:")
-    print(json.dumps(get_market_orderbook(today_market["ticker"]), indent=2))
+    today_markets = get_today_market()
+    print("Open KXHIGHNY markets for today (band midpoint & yes ask):")
+    for row in today_markets:
+        print(
+            json.dumps(
+                {
+                    "ticker": row["ticker"],
+                    "band_midpoint": row["band_midpoint"],
+                    "yes_price": row["yes_price"],
+                },
+                indent=2,
+            )
+        )
